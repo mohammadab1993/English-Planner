@@ -208,6 +208,15 @@ footer{text-align:center;padding:0 0 56px;color:var(--ink3);font-size:13px}
 /* Confetti */
 #confetti{position:fixed;inset:0;pointer-events:none;z-index:99}
 
+/* Daily day-pills */
+.days{display:flex;gap:5px;margin-top:8px;align-items:center;flex-wrap:wrap}
+.day-pill{width:31px;height:25px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--ink3);font-family:var(--f);font-size:10px;font-weight:700;display:flex;align-items:center;justify-content:center;cursor:pointer;transition:all .15s;user-select:none;padding:0}
+.day-pill:hover{border-color:var(--accent);color:var(--accent)}
+.day-pill.on{background:var(--accent);border-color:var(--accent);color:#fff}
+.day-pill.today{box-shadow:0 0 0 1.5px var(--accent)}
+.dcount{font-family:var(--f);font-size:10.5px;font-weight:700;color:var(--ink3);margin-left:3px}
+.mission.done .day-pill{pointer-events:none;opacity:.5}
+
 /* Notes */
 .note-btn{margin-left:8px;align-self:center;border:1px solid var(--line);background:var(--card);color:var(--ink3);font-family:var(--f);font-size:11px;font-weight:700;letter-spacing:.04em;padding:5px 11px;border-radius:99px;cursor:pointer;white-space:nowrap;transition:all .18s}
 .note-btn:hover{border-color:var(--accent);color:var(--accent)}
@@ -515,13 +524,19 @@ const STORE_KEY  = 'english90.progress.v1';  // { id: timestamp(ms) | 1 (legacy)
 const CUSTOM_KEY = 'english90.custom.v1';    // { w3: [{id, txt}] }
 const READ_KEY   = 'english90.reading.v1';   // { id: 1 }
 const NOTE_KEY   = 'english90.notes.v1';     // { id: "note text" }
-let saved = {}, customs = {}, reading = {}, notes = {};
+const DAYS_KEY   = 'english90.days.v1';      // { id: { dayIndex(0=Sat..6=Fri): timestamp } }
+let saved = {}, customs = {}, reading = {}, notes = {}, days = {};
 function safeGet(k){ try { return JSON.parse(localStorage.getItem(k)) || {}; } catch(e){ return {}; } }
 function safeSet(k,v){ try { localStorage.setItem(k, JSON.stringify(v)); } catch(e){} }
 saved   = safeGet(STORE_KEY);
 customs = safeGet(CUSTOM_KEY);
 reading = safeGet(READ_KEY);
 notes   = safeGet(NOTE_KEY);
+days    = safeGet(DAYS_KEY);
+
+/* tasks phrased as daily habits get a 7-day tracker */
+const DAILY_RE = /(daily|every day|every night|per day|each day|\ba day\b)/i;
+const DAY_LABELS = ['Sa','Su','Mo','Tu','We','Th','Fr'];  // week starts Saturday
 
 const CAT_OPTIONS = ['Custom','Series','Book','Reading','Listening','Vocab','Music','Speaking','Shadowing','Writing','Interview','Checkpoint']
   .map(t => `<option value="${t}">${t}</option>`).join('');
@@ -532,20 +547,22 @@ const MINUTES = { Series:25, Book:30, Reading:20, Listening:25, Vocab:20, Music:
 
 /* ---- streak ---- */
 function calcStreak(){
-  const days = new Set();
-  Object.values(saved).forEach(v => {
+  const activeDays = new Set();
+  const addTs = v => {
     if (typeof v === 'number' && v > 1000000){
-      const d = new Date(v); d.setHours(0,0,0,0); days.add(d.getTime());
+      const d = new Date(v); d.setHours(0,0,0,0); activeDays.add(d.getTime());
     }
-  });
+  };
+  Object.values(saved).forEach(addTs);
+  Object.values(days).forEach(o => Object.values(o).forEach(addTs));
   const today = new Date(); today.setHours(0,0,0,0);
   let cursor = today.getTime();
-  if (!days.has(cursor)){
-    if (days.has(cursor - 864e5)) cursor -= 864e5;  // yesterday still counts — today isn't over
+  if (!activeDays.has(cursor)){
+    if (activeDays.has(cursor - 864e5)) cursor -= 864e5;  // yesterday still counts — today isn't over
     else return 0;
   }
   let s = 0;
-  while (days.has(cursor)){ s++; cursor -= 864e5; }
+  while (activeDays.has(cursor)){ s++; cursor -= 864e5; }
   return s;
 }
 function renderStreak(){
@@ -736,6 +753,45 @@ function makeMission(id, txt, tag, week, isCustom){
   mi.addEventListener('click', toggleDone);
   mi.addEventListener('keydown', e => { if (e.key === ' ' || e.key === 'Enter'){ e.preventDefault(); toggleDone(); } });
 
+  /* ---- 7-day tracker for daily tasks ---- */
+  if (DAILY_RE.test(txt) && !/^sunday:/i.test(txt)){  // Sunday checkpoints are one-shot, not habits
+    const wrap = document.createElement('div');
+    wrap.className = 'days';
+    wrap.addEventListener('click', e => e.stopPropagation());
+    const todayIdx = (new Date().getDay() + 1) % 7;  // JS Sun=0 → our Sat=0 grid
+    const cnt = document.createElement('span');
+    cnt.className = 'dcount';
+    const renderCnt = () => { cnt.textContent = Object.keys(days[id] || {}).length + '/7'; };
+    DAY_LABELS.forEach((lb, i) => {
+      const p = document.createElement('button');
+      p.className = 'day-pill' + (i === todayIdx ? ' today' : '');
+      p.textContent = lb;
+      p.title = i === todayIdx ? 'Today' : '';
+      p.setAttribute('aria-label', lb + (i === todayIdx ? ' (today)' : ''));
+      if (days[id] && days[id][i]) p.classList.add('on');
+      p.addEventListener('click', e => {
+        e.stopPropagation();
+        days[id] = days[id] || {};
+        if (days[id][i]){
+          delete days[id][i];
+          if (!Object.keys(days[id]).length) delete days[id];
+        } else {
+          days[id][i] = Date.now();
+        }
+        safeSet(DAYS_KEY, days);
+        p.classList.toggle('on');
+        renderCnt();
+        renderStreak();
+        /* full week of a daily habit → the task completes itself */
+        if (days[id] && Object.keys(days[id]).length === 7 && !mi.classList.contains('done')) toggleDone();
+      });
+      wrap.appendChild(p);
+    });
+    wrap.appendChild(cnt);
+    renderCnt();
+    mi.querySelector('.note-view').before(wrap);
+  }
+
   mi.querySelector('.now-btn').addEventListener('click', e => {
     e.stopPropagation();
     mi.classList.toggle('reading');
@@ -782,6 +838,7 @@ function makeMission(id, txt, tag, week, isCustom){
       delete saved[id];   safeSet(STORE_KEY, saved);
       delete reading[id]; safeSet(READ_KEY, reading);
       delete notes[id];   safeSet(NOTE_KEY, notes);
+      delete days[id];    safeSet(DAYS_KEY, days);
       mi.remove();
       updateWeekCount(week);
       update();
@@ -847,13 +904,17 @@ DATA.forEach((phase, pi) => {
         menu.classList.remove('open');
         if (btn.dataset.act === 'reset'){
           if (!confirm(`Reset all checkmarks in Week ${wnum}?`)) return;
-          week.querySelectorAll('.mission.done').forEach(mi => {
+          week.querySelectorAll('.mission').forEach(mi => {
             mi.classList.remove('done');
             mi.setAttribute('aria-checked','false');
             delete saved[mi.dataset.id];
+            delete days[mi.dataset.id];
             const de = mi.querySelector('.done-date'); if (de) de.textContent = '';
+            mi.querySelectorAll('.day-pill').forEach(p => p.classList.remove('on'));
+            const dc = mi.querySelector('.dcount'); if (dc) dc.textContent = '0/7';
           });
           safeSet(STORE_KEY, saved);
+          safeSet(DAYS_KEY, days);
         } else {
           if (!confirm(`Delete ALL custom tasks in Week ${wnum}? Their notes go too.`)) return;
           week.querySelectorAll('.mission').forEach(mi => {
@@ -861,6 +922,7 @@ DATA.forEach((phase, pi) => {
             delete saved[mi.dataset.id];
             delete reading[mi.dataset.id];
             delete notes[mi.dataset.id];
+            delete days[mi.dataset.id];
             mi.remove();
           });
           customs[wkey] = [];
@@ -868,6 +930,7 @@ DATA.forEach((phase, pi) => {
           safeSet(STORE_KEY, saved);
           safeSet(READ_KEY, reading);
           safeSet(NOTE_KEY, notes);
+          safeSet(DAYS_KEY, days);
         }
         updateWeekCount(week);
         update();
@@ -1036,7 +1099,7 @@ function renderStats(){
 document.getElementById('exportBtn').addEventListener('click', () => {
   const payload = {
     app: 'english90', version: 1, exportedAt: new Date().toISOString(),
-    progress: saved, customs, reading, notes
+    progress: saved, customs, reading, notes, days
   };
   const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
   const a = document.createElement('a');
@@ -1060,6 +1123,7 @@ document.getElementById('importFile').addEventListener('change', e => {
       safeSet(CUSTOM_KEY, d.customs  || {});
       safeSet(READ_KEY,   d.reading  || {});
       safeSet(NOTE_KEY,   d.notes    || {});
+      safeSet(DAYS_KEY,   d.days     || {});
       location.reload();
     } catch(err){
       alert('This file is not a valid English-90 backup.');
